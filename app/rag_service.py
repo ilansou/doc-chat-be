@@ -1,8 +1,9 @@
 import os
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['HF_HUB_OFFLINE'] = '1'
 import shutil
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings
 from llama_index.vector_stores.chroma import ChromaVectorStore
-# CHANGED: Import Groq and HuggingFace
 from llama_index.llms.groq import Groq
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import chromadb
@@ -27,8 +28,7 @@ class RAGService:
         )
         
         # 2. Setup Embedding (HuggingFace - Local CPU)
-        # We explicitly map it to CPU to save costs on deployment
-        print("📥 Loading embedding model (this might take a moment)...")
+        print("📥 Loading embedding model...")
         Settings.embed_model = HuggingFaceEmbedding(
             model_name=Config.EMBEDDING_MODEL,
             device="cpu" 
@@ -36,7 +36,10 @@ class RAGService:
 
     def _initialize_index(self):
         """Loads the index from ChromaDB if it exists."""
+        # Initialize Client
         db = chromadb.PersistentClient(path=Config.PERSIST_DIR)
+        
+        # Get Collection
         chroma_collection = db.get_or_create_collection(Config.COLLECTION_NAME)
         vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -59,26 +62,37 @@ class RAGService:
 
     def ingest_documents(self, files):
         Config.ensure_dirs()
-        
-        # Clear existing data to avoid duplicates (Optional strategy)
-        if os.path.exists(Config.PERSIST_DIR):
-            shutil.rmtree(Config.PERSIST_DIR)
+
+        # 1. Clear DATA_DIR (Safe to do on file system)
         if os.path.exists(Config.DATA_DIR):
             shutil.rmtree(Config.DATA_DIR)
-        Config.ensure_dirs()
+        os.makedirs(Config.DATA_DIR)
 
+        # 2. Save new files
         for file in files:
             file_location = os.path.join(Config.DATA_DIR, file.filename)
             with open(file_location, "wb") as f:
                 shutil.copyfileobj(file.file, f)
 
+        # 3. Handle ChromaDB - THE FIX IS HERE
         db = chromadb.PersistentClient(path=Config.PERSIST_DIR)
-        chroma_collection = db.get_or_create_collection(Config.COLLECTION_NAME)
+        
+        # Instead of deleting the folder (which causes 500 Error: File in Use),
+        # We tell Chroma to delete the COLLECTION logic.
+        try:
+            db.delete_collection(Config.COLLECTION_NAME)
+        except ValueError:
+            pass # Collection didn't exist, that's fine.
+
+        # Create a fresh collection
+        chroma_collection = db.create_collection(Config.COLLECTION_NAME)
         vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
         print("🧠 Processing documents...")
         documents = SimpleDirectoryReader(Config.DATA_DIR).load_data()
+        
+        # Create new index
         self._index = VectorStoreIndex.from_documents(
             documents, storage_context=storage_context
         )

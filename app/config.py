@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # GROQ API KEY (Free)
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
     # Paths
@@ -12,9 +11,10 @@ class Config:
     PERSIST_DIR = "storage_chroma"
     COLLECTION_NAME = "knowledge_base"
     
-    # Model Settings
-    LLM_MODEL = "llama3-8b-8192" # Very fast, free on Groq
-    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2" # Small, fast, runs on CPU
+    # --- MODEL SETTINGS ---
+    LLM_MODEL = "llama-3.1-8b-instant" 
+    
+    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2" 
 
     @staticmethod
     def ensure_dirs():
