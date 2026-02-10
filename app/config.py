@@ -6,6 +6,9 @@ load_dotenv()
 class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+    # Database
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
     # Paths
     DATA_DIR = "data"
     PERSIST_DIR = "storage_chroma"

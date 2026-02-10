@@ -1,110 +1,97 @@
 import os
-os.environ['TRANSFORMERS_OFFLINE'] = '1'
-os.environ['HF_HUB_OFFLINE'] = '1'
 import shutil
+import time
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.groq import Groq
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 import chromadb
 from app.config import Config
 
 class RAGService:
     def __init__(self):
-        self._index = None
-        self._chat_engine = None
         self._initialize_models()
-        self._initialize_index()
+        # Initialize Chroma Client once
+        self._client = chromadb.PersistentClient(path=Config.PERSIST_DIR)
+        self._collection = self._client.get_or_create_collection(Config.COLLECTION_NAME)
 
     def _initialize_models(self):
-        """Setup Free Open Source Models"""
-        if not Config.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY not found in environment variables.")
-            
-        # 1. Setup LLM (Groq - Llama 3)
-        Settings.llm = Groq(
-            model=Config.LLM_MODEL, 
-            api_key=Config.GROQ_API_KEY
-        )
-        
-        # 2. Setup Embedding (HuggingFace - Local CPU)
-        print("📥 Loading embedding model...")
-        Settings.embed_model = HuggingFaceEmbedding(
-            model_name=Config.EMBEDDING_MODEL,
-            device="cpu" 
-        )
+        Settings.llm = Groq(model=Config.LLM_MODEL, api_key=Config.GROQ_API_KEY)
+        # Use CPU for embeddings to save cost
+        Settings.embed_model = HuggingFaceEmbedding(model_name=Config.EMBEDDING_MODEL, device="cpu")
 
-    def _initialize_index(self):
-        """Loads the index from ChromaDB if it exists."""
-        # Initialize Client
-        db = chromadb.PersistentClient(path=Config.PERSIST_DIR)
-        
-        # Get Collection
-        chroma_collection = db.get_or_create_collection(Config.COLLECTION_NAME)
-        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    def _get_index(self):
+        vector_store = ChromaVectorStore(chroma_collection=self._collection)
+        return VectorStoreIndex.from_vector_store(vector_store=vector_store)
 
-        if chroma_collection.count() > 0:
-            print("📚 Loading existing index from storage...")
-            self._index = VectorStoreIndex.from_vector_store(
-                vector_store, storage_context=storage_context
-            )
-            self._create_chat_engine()
-        else:
-            print("⚠️ No index found. Please upload documents.")
-
-    def _create_chat_engine(self):
-        if self._index:
-            self._chat_engine = self._index.as_chat_engine(
-                chat_mode="context",
-                system_prompt="You are a helpful Knowledge Oracle. Answer strictly based on the provided context."
-            )
-
-    def ingest_documents(self, files):
+    def ingest_documents(self, files, user_id: str):
         Config.ensure_dirs()
-
-        # 1. Clear DATA_DIR (Safe to do on file system)
-        if os.path.exists(Config.DATA_DIR):
-            shutil.rmtree(Config.DATA_DIR)
-        os.makedirs(Config.DATA_DIR)
-
-        # 2. Save new files
-        for file in files:
-            file_location = os.path.join(Config.DATA_DIR, file.filename)
-            with open(file_location, "wb") as f:
-                shutil.copyfileobj(file.file, f)
-
-        # 3. Handle ChromaDB - THE FIX IS HERE
-        db = chromadb.PersistentClient(path=Config.PERSIST_DIR)
         
-        # Instead of deleting the folder (which causes 500 Error: File in Use),
-        # We tell Chroma to delete the COLLECTION logic.
+        # 1. Create a specific temp folder for this user
+        # Sanitize user_id just in case
+        safe_user_id = "".join([c for c in user_id if c.isalnum() or c in ('-','_')])
+        temp_dir = os.path.join(Config.DATA_DIR, safe_user_id)
+        
+        if os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except OSError:
+                pass # Ignore if previous run left locked files
+        
+        os.makedirs(temp_dir, exist_ok=True)
+
         try:
-            db.delete_collection(Config.COLLECTION_NAME)
-        except ValueError:
-            pass # Collection didn't exist, that's fine.
+            # 2. Save uploaded files to temp folder
+            for file in files:
+                file_path = os.path.join(temp_dir, file.filename)
+                with open(file_path, "wb") as f:
+                    shutil.copyfileobj(file.file, f)
 
-        # Create a fresh collection
-        chroma_collection = db.create_collection(Config.COLLECTION_NAME)
-        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            # 3. Load Documents
+            loader = SimpleDirectoryReader(temp_dir)
+            documents = loader.load_data()
+            
+            # 4. TAGGING: Add user_id to every document metadata
+            for doc in documents:
+                doc.metadata["user_id"] = user_id
 
-        print("🧠 Processing documents...")
-        documents = SimpleDirectoryReader(Config.DATA_DIR).load_data()
+            # 5. Insert into Vector DB (Append mode)
+            vector_store = ChromaVectorStore(chroma_collection=self._collection)
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            
+            # This appends to the existing collection
+            VectorStoreIndex.from_documents(documents, storage_context=storage_context)
+            
+            return len(files)
+
+        finally:
+            # 6. Cleanup (Safe Mode)
+            # We wait a split second to let file handles release
+            time.sleep(0.5)
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except OSError as e:
+                print(f"⚠️ Warning: Could not delete temp files immediately: {e}")
+                # We don't raise the error, so the user still gets a 'Success' response
+
+    def chat(self, message: str, user_id: str):
+        index = self._get_index()
         
-        # Create new index
-        self._index = VectorStoreIndex.from_documents(
-            documents, storage_context=storage_context
+        # Filter by user_id
+        filters = MetadataFilters(
+            filters=[
+                ExactMatchFilter(key="user_id", value=user_id)
+            ]
+        )
+
+        chat_engine = index.as_chat_engine(
+            chat_mode="context",
+            filters=filters,
+            system_prompt="You are a helpful assistant. Answer based only on the user's documents."
         )
         
-        self._create_chat_engine()
-        return len(files)
-
-    def chat(self, message: str):
-        if not self._chat_engine:
-            raise Exception("Index not initialized. Please upload documents first.")
-        
-        response = self._chat_engine.chat(message)
-        return response
+        return chat_engine.chat(message)
 
 rag_service = RAGService()

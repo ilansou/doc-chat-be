@@ -2,9 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import Config
 from app.routes import router
+from app.database import init_db
 
 # 1. Setup Config
 Config.ensure_dirs()
+init_db()
 
 # 2. Initialize App
 app = FastAPI(title="Personal Knowledge Oracle API")
