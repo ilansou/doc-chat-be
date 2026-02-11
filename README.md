@@ -50,6 +50,6 @@ A high-performance RAG (Retrieval-Augmented Generation) API built with FastAPI, 
 
 ## 📚 API Endpoints
 
-POST /upload: Ingest PDF/MD files.
-POST /chat: Query the RAG engine.
+POST /upload: Ingest PDF/MD files.\
+POST /chat: Query the RAG engine.\
 GET /chats/{user_id}: Fetch chat history.
