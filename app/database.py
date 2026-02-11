@@ -4,7 +4,17 @@ from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 from app.config import Config
 
-engine = create_engine(Config.DATABASE_URL)
+# --- THE FIX IS HERE ---
+# We add pool_pre_ping=True (checks connection health)
+# We add pool_recycle=300 (refreshes connection every 5 mins)
+engine = create_engine(
+    Config.DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=10
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -25,7 +35,6 @@ class Message(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     chat = relationship("Chat", back_populates="messages")
 
-# NEW: Table to remember uploaded files
 class Document(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, autoincrement=True)
